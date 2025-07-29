@@ -1,9 +1,9 @@
 --!native
 --!optimize 2
 
-local jecs = require "../jecs"
-local common = require "./common"
-local utils = require "./utils"
+local jecs = require(script.Parent.Parent.Parent.jecs)
+local common = require(script.Parent.common)
+local utils = require(script.Parent.utils)
 
 local cursor = utils.cursor
 type Cursor = utils.Cursor
@@ -19,7 +19,6 @@ export type Client = {
 
 	components: common.Components,
 	shared: common.Shared,
-	global_id_parser: ((id: number) -> Entity)?,
 	server_ids: { [number]: Entity },
 	client_ids: { [Entity]: number },
 	ordered_creation: boolean,
@@ -28,21 +27,31 @@ export type Client = {
 	init: (self: Client, world: World?) -> (),
 	destroy: (self: Client) -> (),
 	after_replication: (self: Client, callback: () -> ()) -> (),
-	parse_global_id: (self: Client, parser: (id: number) -> Entity) -> (),
-	get_server_entity: (self: Client, client_entity: Entity) -> number?,
-	get_client_entity: (self: Client, server_entity: number) -> Entity?,
 
+	call_deleted: (self: Client, id: Entity) -> nil,
+	call_added: (self: Client, id: Entity) -> nil,
+	call_changed: (self: Client, id: Entity, component: Entity, new: any) -> nil,
+	call_removed: (self: Client, id: Entity, component: Entity) -> nil,
+
+	added: (self: Client, (Entity) -> nil) -> nil,
+	changed: (self: Client, (Entity, Entity, any) -> nil) -> nil,
+	removed: (self: Client, (Entity, Entity) -> nil) -> nil,
+	deleted: (self: Client, (Entity) -> nil) -> nil,
+	hooks: {
+		added: ((Entity) -> nil)?,
+		changed: ((Entity, Entity, any) -> nil)?,
+		removed: ((Entity, Entity) -> nil)?,
+		deleted: ((Entity) -> nil)?
+	},
 	apply_updates: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
 	apply_unreliable: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
 	apply_full: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
 }
 
-local GLOBAL_ID_OFFSET = 10
 local ENTITY_ID_TYPES = {
-	entity = 1,
+	id = 1,
 	custom = 2,
 	shared = 3,
-	global = 4,
 }
 
 local ECS_NAME = jecs.Name
@@ -59,6 +68,8 @@ local function get_or_create_entity(client: Client, server_id: number): Entity
 		local entity = client.world:entity()
 		client.server_ids[server_id] = entity
 		client.client_ids[entity] = server_id
+
+		client:call_added(entity)
 		return entity
 	end
 end
@@ -93,46 +104,31 @@ local function read_component_value(client: Client, c: Cursor, variants: { any }
 	end
 end
 
-local function resolve_global_id(client: Client, global_id: number): Entity
-	if not client.global_id_parser then
-		error "global id parser not set, consider using client:parse_global_id()"
-	end
-	local parsed = client.global_id_parser(global_id)
-	return parsed
-end
-
 local function read_entity_id(client: Client, c: Cursor, variants: { any }?): (Entity?, number?)
 	local id_type = cursor.readi8(c)
 
-	if id_type <= 10 then
-		if id_type == ENTITY_ID_TYPES.entity then
-			local server_id = cursor.readu40(c)
-			return client.server_ids[server_id], server_id
-		elseif id_type == ENTITY_ID_TYPES.custom then
-			local component, value = read_component_value(client, c, variants)
-			local custom_getter = client.custom_ids[component]
-			if not custom_getter then
-				error(
-					`received a custom id for a non custom component, consider adding custom_id to component: {client.world:get(
-						component,
-						ECS_NAME
-					) or "(no name)"} id: {component}`
-				)
-			end
-			return custom_getter(value), nil
-		elseif id_type == ENTITY_ID_TYPES.shared then
-			return read_component_id(client, c), nil
-		elseif id_type == ENTITY_ID_TYPES.global then
-			local global_id = cursor.readu8(c) - GLOBAL_ID_OFFSET
-			return resolve_global_id(client, global_id), nil
+	if id_type == ENTITY_ID_TYPES.id then
+		local server_id = cursor.readu24(c)
+		return client.server_ids[server_id], server_id
+	elseif id_type == ENTITY_ID_TYPES.custom then
+		local component, value = read_component_value(client, c, variants)
+		local custom_getter = client.custom_ids[component]
+		if not custom_getter then
+			error(
+				`received a custom id for a non custom component, consider adding custom_id to component: {client.world:get(
+					component,
+					ECS_NAME
+				) or "(no name)"} id: {component}`
+			)
 		end
-		error("malformed entity id" .. cursor.readu32(c))
-	else
-		return resolve_global_id(client, id_type - GLOBAL_ID_OFFSET), nil
+		return custom_getter(value), nil
+	elseif id_type == ENTITY_ID_TYPES.shared then
+		return read_component_id(client, c), nil
 	end
+	error("malformed entity id" .. cursor.readu32(c))
 end
 
-local function process_entity_id(client: Client, c: Cursor, variants: { any }?, v: boolean?)
+local function process_entity_id(client: Client, c: Cursor, variants: { any }?)
 	local entity, server_id = read_entity_id(client, c, variants)
 	if entity then
 		return entity
@@ -145,31 +141,37 @@ local function process_entity(client: Client, c: Cursor, variants: { any }?)
 	local entity = process_entity_id(client, c, variants)
 
 	local total_tags = cursor.read_vlq(c)
-	for _ = 1, total_tags do
+	for i = 1, total_tags do
 		local tag = read_component_id(client, c)
+		client:call_changed(entity, tag)
 		client.world:add(entity, tag)
 	end
 
 	local total_components = cursor.read_vlq(c)
-	for _ = 1, total_components do
+	for i = 1, total_components do
 		local component, value = read_component_value(client, c, variants)
+		client:call_changed(entity, component, value)
 		client.world:set(entity, component, value)
 	end
 
 	local total_pairs = cursor.read_vlq(c)
-	for _ = 1, total_pairs do
+	for i = 1, total_pairs do
 		local relation = read_component_id(client, c)
 		local total_targets = cursor.read_vlq(c)
 
-		for _ = 1, total_targets do
+		for i = 1, total_targets do
 			local target = process_entity_id(client, c, variants)
-			client.world:add(entity, PAIR(relation, target))
+			local pair = PAIR(relation, target)
+
+			client:call_changed(entity, pair)
+			client.world:add(entity, pair)
 		end
 	end
 end
 
 local function apply_updates(client: Client, buf: buffer, all_variants: { { any } }?)
 	local c = cursor.from(buf)
+
 	local total_packets = cursor.read_vlq(c)
 	local variant_start = (all_variants and #all_variants + 1) :: number
 
@@ -182,26 +184,28 @@ local function apply_updates(client: Client, buf: buffer, all_variants: { { any 
 		end
 
 		local total_changed = cursor.read_vlq(c)
-		for _ = 1, total_changed do
+		for i = 1, total_changed do
 			local entity = process_entity_id(client, c, variants)
 			local total_tagged = cursor.read_vlq(c)
-			for _ = 1, total_tagged do
+			for i = 1, total_tagged do
 				local tag = read_component_id(client, c)
+				client:call_changed(entity, tag)
 				client.world:add(entity, tag)
 			end
 
 			local total_components = cursor.read_vlq(c)
-			for _ = 1, total_components do
+			for i = 1, total_components do
 				local component, value = read_component_value(client, c, variants)
+				client:call_changed(entity, component, value)
 				client.world:set(entity, component, value)
 			end
 
 			local total_pairs = cursor.read_vlq(c)
-			for _ = 1, total_pairs do
+			for i = 1, total_pairs do
 				local relation = read_component_id(client, c)
 				local total_targets = cursor.read_vlq(c)
 
-				for _ = 1, total_targets do
+				for t = 1, total_targets do
 					local id_type = cursor.readi8(c)
 					-- here I use negative numbers to indicate removals
 					-- but "process_entity_id" expects a positive value
@@ -211,47 +215,55 @@ local function apply_updates(client: Client, buf: buffer, all_variants: { { any 
 					local target = process_entity_id(client, c, variants)
 
 					if id_type > 0 then
-						client.world:add(entity, PAIR(relation, target))
+						local pair = PAIR(relation, target)
+						client:call_changed(entity, pair)
+						client.world:add(entity, pair)
 					elseif id_type < 0 then
-						client.world:remove(entity, PAIR(relation, target))
+						local pair = PAIR(relation, target)
+						client:call_removed(entity, pair)
+						client.world:remove(entity, pair)
 					end
 				end
 			end
 
 			local total_removed = cursor.read_vlq(c)
-			for _ = 1, total_removed do
+			for i = 1, total_removed do
 				local component = read_component_id(client, c)
+				client:call_removed(entity, component)
 				client.world:remove(entity, component)
 			end
 		end
 
 		local total_component_deleted = cursor.read_vlq(c)
-		for _ = 1, total_component_deleted do
+		for i = 1, total_component_deleted do
 			local entity = process_entity_id(client, c, variants)
 
 			local total_tags = cursor.read_vlq(c)
-			for _ = 1, total_tags do
+			for i = 1, total_tags do
 				local tag = read_component_id(client, c)
+				client:call_removed(entity, tag)
 				client.world:remove(entity, tag)
 			end
 
 			local total_components = cursor.read_vlq(c)
-			for _ = 1, total_components do
+			for i = 1, total_components do
 				local component = read_component_id(client, c)
+				client:call_removed(entity, component)
 				client.world:remove(entity, component)
 			end
 
 			local total_pairs = cursor.read_vlq(c)
-			for _ = 1, total_pairs do
+			for i = 1, total_pairs do
 				local relation = read_component_id(client, c)
 				utils.remove_all_relations(client.world, entity, relation)
 			end
 		end
 
 		local total_deleted = cursor.read_vlq(c)
-		for _ = 1, total_deleted do
+		for i = 1, total_deleted do
 			local entity, server_id = read_entity_id(client, c, variants)
 			if entity then
+				client:call_deleted(entity)
 				client.world:delete(entity)
 			end
 			if server_id then
@@ -270,17 +282,18 @@ local function apply_unreliable(client: Client, buf: buffer, all_variants: { { a
 		local total_entities = cursor.read_vlq(c)
 		local variants = all_variants and all_variants[variant_start - a]
 
-		for _ = 1, total_entities do
+		for e = 1, total_entities do
 			local entity = read_entity_id(client, c, variants)
 			local total_unreliable = cursor.read_vlq(c)
 
 			if entity then
 				local component_id, value = read_component_value(client, c, variants)
 				client.world:set(entity, component_id, value)
+				client:call_changed(component_id, value)
 			else
 				-- dont apply unreliable updates to entities that dont exist in the client yet
 				-- but we still need to process the values to keep the cursor in the right place
-				for _ = 1, total_unreliable do
+				for u = 1, total_unreliable do
 					read_component_value(client, c, variants)
 				end
 			end
@@ -297,9 +310,51 @@ local function apply_full(client: Client, buf: buffer, all_variants: { { any } }
 		local total_entities = cursor.read_vlq(c)
 		local variants = all_variants and all_variants[variant_start - a]
 
-		for _ = 1, total_entities do
+		for e = 1, total_entities do
 			process_entity(client, c, variants)
 		end
+	end
+end
+
+
+local function added(client: Client, callback: (Entity) -> nil)
+	client.hooks.added = callback
+end
+
+local function changed(client: Client, callback: (Entity, Entity, any) -> nil)
+	client.hooks.changed = callback
+end
+
+local function removed(client: Client, callback: (Entity, Entity) -> nil)
+	client.hooks.removed = callback
+end
+
+local function deleted(client: Client, callback: (Entity) -> nil)
+	client.hooks.deleted = callback
+end
+
+
+local function call_deleted(client: Client, id: Entity)
+	if client.hooks.deleted then
+		client.hooks.deleted(id)
+	end
+end
+
+local function call_added(client: Client, id: Entity)
+	if client.hooks.added then
+		client.hooks.added(id)
+	end
+end
+
+local function call_changed(client: Client, id: Entity, component: Entity, new: any)
+	if client.hooks.changed then
+		client.hooks.changed(id, component, new)
+	end
+end
+
+local function call_removed(client: Client, id: Entity, component: Entity)
+	if client.hooks.removed then
+		client.hooks.removed(id, component)
 	end
 end
 
@@ -336,14 +391,6 @@ local function after_replication(client: Client, callback: () -> ())
 	end
 end
 
-local function get_server_entity(client: Client, client_entity: Entity): number?
-	return client.client_ids[client_entity]
-end
-
-local function get_client_entity(client: Client, client_entity: number): Entity?
-	return client.server_ids[client_entity]
-end
-
 local function destroy(client: Client)
 	if client.inited == nil then
 		return warn "attempted to destroy a client twice"
@@ -351,10 +398,6 @@ local function destroy(client: Client)
 	client.inited = nil :: any
 	-- I'll add any logic here if I need to clean up something
 	-- right now this is kind of useless
-end
-
-local function parse_global_id(client: Client, parser: (id: number) -> Entity)
-	client.global_id_parser = parser
 end
 
 local client = {}
@@ -365,9 +408,16 @@ client.after_replication = after_replication
 client.apply_updates = apply_updates
 client.apply_unreliable = apply_unreliable
 client.apply_full = apply_full
-client.get_server_entity = get_server_entity
-client.get_client_entity = get_client_entity
-client.parse_global_id = parse_global_id
+client.hooks = {}
+client.added = added
+client.changed = changed
+client.removed = removed
+client.deleted = deleted
+
+client.call_deleted = call_deleted
+client.call_added = call_added
+client.call_changed = call_changed
+client.call_removed = call_removed
 
 local function create(world: World?, components: common.Components): Client
 	local self = {} :: Client
@@ -377,7 +427,6 @@ local function create(world: World?, components: common.Components): Client
 	self.custom_ids = {}
 	self.server_ids = {}
 	self.client_ids = {}
-	self.global_id_parser = nil
 	self.world = world :: any
 	self.inited = false
 	self.is_replicating = false

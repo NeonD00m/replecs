@@ -1,8 +1,8 @@
 --!native
 --!optimize 2
 
-local jecs = require "../jecs"
-local common = require "./common"
+local jecs = require(script.Parent.Parent.Parent.jecs)
+local common = require(script.Parent.common)
 
 type World = jecs.World
 type Entity<T = any> = jecs.Entity<T>
@@ -38,33 +38,23 @@ function cursor.from(buf: buffer): Cursor
 	}
 end
 
-function cursor.tryalloc(c: Cursor, bytes: number)
-	local buf = c.buffer
-	local offset = c.offset
+function cursor.tryalloc(cursor: Cursor, bytes: number)
+	local buf = cursor.buffer
+	local offset = cursor.offset
 	local len = buffer.len(buf)
 
 	if len < offset + bytes then
 		local exponent = math.ceil(math.log((bytes + offset) / len, 1.5))
 		local new = buffer.create(len * 1.5 ^ exponent)
 		buffer.copy(new, 0, buf, 0)
-		c.buffer = new
+		cursor.buffer = new
 	end
 end
 
-function cursor.write_buffer(c: Cursor, buf: buffer, start: number?, count: number?)
-	if start == nil and count == nil then
-		cursor.tryalloc(c, buffer.len(buf))
-		buffer.copy(c.buffer, c.offset, buf, 0, buffer.len(buf))
-		c.offset += buffer.len(buf)
-	else
-		local len = buffer.len(buf)
-		local available = len - (start or 0)
-		local write_count = count and math.min(available, count) or available
-
-		cursor.tryalloc(c, write_count)
-		buffer.copy(c.buffer, c.offset, buf, start or 0, write_count)
-		c.offset += write_count
-	end
+function cursor.write_buffer(c: Cursor, buf: buffer)
+	cursor.tryalloc(c, buffer.len(buf))
+	buffer.copy(c.buffer, c.offset, buf, 0, buffer.len(buf))
+	c.offset += buffer.len(buf)
 end
 
 function cursor.writeu8(c: Cursor, value: number)
@@ -89,13 +79,6 @@ function cursor.writeu32(c: Cursor, value: number)
 	cursor.tryalloc(c, 4)
 	buffer.writeu32(c.buffer, c.offset, value :: any)
 	c.offset += 4
-end
-
-function cursor.writeu40(c: Cursor, value: number)
-	cursor.tryalloc(c, 5)
-	buffer.writeu8(c.buffer, c.offset, value)
-	buffer.writeu32(c.buffer, c.offset + 1, value // 256)
-	c.offset += 5
 end
 
 function cursor.writei8(c: Cursor, value: number)
@@ -139,17 +122,9 @@ function cursor.readu24(c: Cursor): number
 	local two = buffer.readu16(c.buffer, c.offset + 1)
 	return one + two * 256
 end
-
 function cursor.readu32(c: Cursor): number
 	c.offset -= 4
 	return buffer.readu32(c.buffer, c.offset)
-end
-
-function cursor.readu40(c: Cursor): number
-	c.offset -= 5
-	local one = buffer.readu8(c.buffer, c.offset)
-	local two = buffer.readu32(c.buffer, c.offset + 1)
-	return one + two * 256
 end
 
 function cursor.readi8(c: Cursor): number
@@ -532,9 +507,7 @@ utils.bitmask = {
 
 function utils.create_shared_lookup(world: World, components: common.Components)
 	local shared: common.Shared = {
-		lookup = {
-			["jecs.ChildOf"] = CHILD_OF,
-		},
+		lookup = {},
 		serdes = {},
 		bytespan = {},
 		ids = {},
@@ -567,6 +540,8 @@ function utils.create_shared_lookup(world: World, components: common.Components)
 		component_ids[shared.lookup[name]] = id
 		id_components[id] = component
 	end
+
+	component_ids[CHILD_OF] = #keys + 1
 
 	shared.ids = component_ids
 	shared.components = id_components

@@ -1,10 +1,10 @@
 --!optimize 2
 --!native
 
-local jecs = require "../jecs"
-local utils = require "./utils"
-local common = require "./common"
-local masking_controller = require "./masking"
+local jecs = require(script.Parent.Parent.Parent.jecs)
+local utils = require(script.Parent.utils)
+local common = require(script.Parent.common)
+local masking_controller = require(script.Parent.masking)
 
 type Cursor = utils.Cursor
 
@@ -15,10 +15,8 @@ type Set<T> = { [T]: boolean }
 type Map<K, V> = { [K]: V }
 type Array<T> = { T }
 
-type FunctionFilter = (player: Player) -> boolean
-
 type TrackInfo = {
-	entities: Map<Entity, boolean>,
+	entities: { [Entity]: boolean },
 	components: { [Entity]: { [Entity]: number } },
 }
 
@@ -38,18 +36,15 @@ export type Server = {
 
 	components: common.Components,
 	hooks: common.WorldHooks,
-	alive_tracked: Set<Entity>,
+	alive_tracked: { [Entity]: boolean },
 
 	track_info: TrackInfo,
-	additions: Set<Entity>,
-	custom_ids: Map<Entity, Entity<any>>,
-	global_ids: Map<Entity, number>,
+	additions: { [Entity]: boolean },
+	custom_ids: { [Entity]: Entity },
 	storage: Storage,
-	hooked: Array<() -> ()>,
+	hooked: { () -> () },
 	masking: masking_controller.MaskingController,
-	pending_cleanups: Set<Entity>,
-	connections: Array<RBXScriptConnection>,
-	function_filters: masking_controller.EntityComponentIndex<FunctionFilter>,
+	connections: { RBXScriptConnection },
 
 	init: (self: Server, world: World?) -> (),
 	destroy: (self: Server) -> (),
@@ -64,7 +59,6 @@ export type Server = {
 local cursor = utils.cursor
 
 local NIL_COMPONENT_VALUE = newproxy()
-local GLOBAL_ID_OFFSET = 10
 
 local COMPONENT_TYPES = masking_controller.COMPONENT_TYPES
 local TRACK_TYPES = {
@@ -72,12 +66,10 @@ local TRACK_TYPES = {
 	tag = 2,
 	pair = 3,
 }
-local MAX_PACKET_SIZE = 10000
 local ENTITY_ID_TYPES = {
-	entity = 1,
+	id = 1,
 	custom = 2,
 	shared = 3,
-	global = 4,
 }
 local ECS_COMPONENT = jecs.Component
 
@@ -86,6 +78,9 @@ local function IS_PAIR(id: Entity): boolean
 end
 local function PAIR_SECOND(world: World, id: Entity): Entity
 	return jecs.pair_second(world, id)
+end
+local function ECS_ID(entity: Entity): number
+	return jecs.ECS_ID(entity :: any)
 end
 
 local function track_entity_lifetime(server: Server, entity: Entity)
@@ -171,8 +166,6 @@ local function allocate_pair_removal(server: Server, entity: Entity, relation: E
 	end
 end
 
-local function cleanup_entity(server: Server, entity: Entity) end
-
 local function track_component(server: Server, component: Entity<any>)
 	local world = server.world
 	local hooks = server.hooks
@@ -201,7 +194,7 @@ local function track_component(server: Server, component: Entity<any>)
 			allocate_pair_addition(server, entity, component, PAIR_SECOND(world, id))
 		end
 	end))
-	hook(hooks.changed(world, component, function(entity, _id, value)
+	hook(hooks.changed(world, component, function(entity, id, value)
 		local track_type = info[entity]
 		if not track_type then
 			return
@@ -362,16 +355,8 @@ end
 
 local function write_entity_id(server: Server, c: Cursor, entity: Entity, variants: { any }, multiply: number?)
 	local custom = server.custom_ids[entity]
-	local global_id = server.global_ids[entity]
 
-	if global_id then
-		if multiply then
-			cursor.writei8(c, ENTITY_ID_TYPES.global * multiply)
-			cursor.writeu8(c, global_id + GLOBAL_ID_OFFSET)
-		else
-			cursor.writei8(c, global_id + GLOBAL_ID_OFFSET)
-		end
-	elseif custom then
+	if custom then
 		local value = server.world:get(entity, custom)
 		write_component_value(server, c, custom, value, variants)
 		cursor.writei8(c, ENTITY_ID_TYPES.custom * (multiply or 1))
@@ -381,8 +366,8 @@ local function write_entity_id(server: Server, c: Cursor, entity: Entity, varian
 			cursor.writeu8(c, shared_id)
 			cursor.writei8(c, ENTITY_ID_TYPES.shared * (multiply or 1))
 		else
-			cursor.writeu40(c, entity :: any)
-			cursor.writei8(c, ENTITY_ID_TYPES.entity * (multiply or 1))
+			cursor.writeu24(c, ECS_ID(entity :: any))
+			cursor.writei8(c, ENTITY_ID_TYPES.id * (multiply or 1))
 		end
 	end
 end
@@ -481,14 +466,14 @@ end
 local function create_packet_iterator(packets: { [Player]: MemberPackets })
 	local iterated: Player? = nil
 	local function iterator()
-		local player, data = next(packets, iterated)
+		local player, packets = next(packets, iterated)
 		if not player then
 			return nil :: any
 		end
 		iterated = player
 
-		local combined = combine_packet_outputs(data.buffers, data.total_size)
-		return player, combined, data.variants
+		local combined = combine_packet_outputs(packets.buffers, packets.total_size)
+		return player, combined, packets.variants
 	end
 	return iterator :: () -> (Player, buffer, { { any } })
 end
@@ -576,7 +561,7 @@ local function collect_updates(server: Server)
 		local changed = 0
 		for entity, changes in storage_changes.changed do
 			local total_removed = 0
-			for component in changes.removed do
+			for component, value in changes.removed do
 				write_component_id(server, c, component)
 				total_removed += 1
 			end
@@ -588,7 +573,7 @@ local function collect_updates(server: Server)
 
 				for target, added in targets do
 					if added then
-						write_entity_id(server, c, target, variants, 1)
+						write_entity_id(server, c, target, variants)
 					else
 						write_entity_id(server, c, target, variants, -1)
 					end
@@ -642,54 +627,19 @@ local function collect_updates(server: Server)
 end
 
 local function collect_unreliable(server: Server)
-	local world = server.world
+	-- todo: max packet size (for unreliables 1kb limit)
 	local packets: { [Player]: MemberPackets } = {}
+	local world = server.world
 
+	-- maybe more lookups to quickly iterate these too? ;-;
 	for _, mask_storage in server.masking.storages do
-		local active = mask_storage.active
-
 		local c = cursor.new()
-		local variants = {} :: { { any } }
+		local variants = {}
+
+		local active = mask_storage.active
 		local total_entities = 0
 
-		local checkpoint_offset = 0
-		local checkpoint_variants_count = 0
-		local checkpoint_total_entities = 0
-
-		local function create_checkpoint()
-			checkpoint_offset = c.offset
-			checkpoint_variants_count = #variants
-			checkpoint_total_entities = total_entities
-		end
-
-		local function rollback_checkpoint()
-			c.offset = checkpoint_offset
-			local new_cursor = cursor.new()
-			cursor.write_buffer(new_cursor, c.buffer, checkpoint_offset)
-			c = new_cursor
-
-			local new_variants = {} :: { { any } }
-			for _ = #variants, checkpoint_variants_count + 1, -1 do
-				table.insert(new_variants, 1, table.remove(variants))
-			end
-			variants = new_variants
-
-			total_entities = total_entities - checkpoint_total_entities
-		end
-
-		local function commit_checkpoint(commit_c, commit_variants, commit_total_entities)
-			if commit_total_entities <= 0 then
-				return
-			end
-
-			cursor.write_vlq(c, commit_total_entities)
-			local output = cursor.close(commit_c)
-			append_packet(packets, mask_storage.mask.members, output, commit_variants)
-		end
-
 		for entity, actives in active do
-			create_checkpoint()
-
 			local total_unreliable = 0
 			for component in actives.components[COMPONENT_TYPES.unreliable] do
 				local value = world:get(entity, component)
@@ -707,17 +657,15 @@ local function collect_unreliable(server: Server)
 			total_entities += 1
 			cursor.write_vlq(c, total_unreliable)
 			write_entity_id(server, c, entity, variants)
-
-			local current_size = c.offset
-			if current_size > MAX_PACKET_SIZE then
-				local commit_cursor = c
-				local commit_variants = variants
-				local commit_total_entities = total_entities
-				rollback_checkpoint()
-				commit_checkpoint(commit_cursor, commit_variants, commit_total_entities)
-			end
 		end
-		commit_checkpoint(c, variants, total_entities)
+
+		if total_entities <= 0 then
+			continue
+		end
+		cursor.write_vlq(c, total_entities)
+
+		local output = cursor.close(c)
+		append_packet(packets, mask_storage.mask.members, output, variants)
 	end
 
 	return create_packet_iterator(packets)
@@ -764,7 +712,7 @@ function init(server: Server, _world: World?)
 		table.insert(server.hooked, unhook)
 	end
 
-	hook(hooks.added(world, components.networked, function(entity, _id, filter)
+	hook(hooks.added(world, components.networked, function(entity, id, filter)
 		masking:unregister_stop_entity(entity)
 		masking:start_entity(entity, filter)
 		masking:propagate_entity_addition(entity)
@@ -773,7 +721,7 @@ function init(server: Server, _world: World?)
 		server.track_info.entities[entity] = true
 		track_entity_lifetime(server, entity)
 	end))
-	hook(hooks.changed(world, components.networked, function(entity, _id, filter)
+	hook(hooks.changed(world, components.networked, function(entity, id, filter)
 		masking:set_entity(entity, filter)
 	end))
 	hook(hooks.removed(world, components.networked, function(entity)
@@ -813,10 +761,6 @@ function init(server: Server, _world: World?)
 		if not IS_PAIR(id) then
 			utils.logerror "reliable should be used with a pair relationship"
 		end
-		if not server.track_info.entities[entity] then
-			return
-		end
-
 		local component = PAIR_SECOND(world, id)
 		local component_type = untrack_entity_component(server, entity, component)
 		if not component_type then
@@ -875,7 +819,7 @@ function init(server: Server, _world: World?)
 			utils.logerror "unreliable should be used with a pair relationship"
 		end
 		local component = PAIR_SECOND(world, id)
-		untrack_entity_component(server, entity, component)
+		untrack_entity_component(server, entity, component, COMPONENT_TYPES.unreliable)
 		masking:register_stop_component(entity, component, COMPONENT_TYPES.unreliable)
 		masking:stop_component(entity, component, COMPONENT_TYPES.unreliable)
 	end))
@@ -892,32 +836,13 @@ function init(server: Server, _world: World?)
 
 		server.custom_ids[entity] = target
 	end))
-	hook(hooks.removed(world, components.custom_id, function(entity)
+	hook(hooks.removed(world, components.custom_id, function(entity, id)
 		server.custom_ids[entity] = nil
-	end))
-	hook(hooks.added(world, components.global_id, function(entity, id, value)
-		if value > 245 then
-			utils.logerror "global id size exceeded, max is 245"
-		end
-		server.global_ids[entity] = value
-	end))
-	hook(hooks.changed(world, components.global_id, function(entity, id, value)
-		if value > 245 then
-			utils.logerror "global id size exceeded, max is 245"
-		end
-		server.global_ids[entity] = value
-	end))
-	hook(hooks.removed(world, components.global_id, function(entity)
-		server.global_ids[entity] = nil
 	end))
 
 	hook(hooks.removed(world, components.__alive_tracking__, function(entity)
-		if server.track_info.entities[entity] then
-			-- This is in case alive tracking removal is called before networked removal
-			server.pending_cleanups[entity] = true
-		else
-			cleanup_entity(server, entity)
-		end
+		-- TODO: cleanup entity garbage on deletion
+		server.custom_ids[entity] = nil
 	end))
 
 	if game and game:GetService("RunService"):IsServer() then
@@ -975,8 +900,6 @@ local function create(world: World?, components: common.Components): Server
 	self.additions = {}
 	self.storage = {}
 	self.hooked = {}
-	self.global_ids = {}
-	self.pending_cleanups = {}
 	self.track_info = {
 		entities = {},
 		components = {},
