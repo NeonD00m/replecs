@@ -1,10 +1,10 @@
-name = "pepeeltoro41/replecs"
-authors = ["PepeElToro41"]
+name = "neond00m/replecs"
+authors = ["PepeElToro41", "NeonD00m"]
 description = "Networking library for Jecs"
-includes = ["pesde.toml", "README.md", "LICENSE.md", "src"]
+includes = ["pesde.toml", "README.md", "LICENSE.md", "src/**"]
 license = "MIT"
 repository = "https://github.com/PepeElToro41/replecs"
-version = "0.0.1"
+version = "0.0.1-rc.2-dev.1"
 
 [indices]
 default = "https://github.com/pesde-pkg/index"
