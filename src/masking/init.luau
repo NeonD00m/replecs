@@ -1,4 +1,4 @@
-local jecs = require(script.Parent.Parent.Parent.jecs)
+local jecs = require(script.Parent.Parent.roblox_packages.jecs)
 local utils = require(script.Parent.utils)
 local mask_generator = require(script.mask_generator)
 

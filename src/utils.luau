@@ -1,7 +1,7 @@
 --!native
 --!optimize 2
 
-local jecs = require(script.Parent.Parent.Parent.jecs)
+local jecs = require(script.Parent.Parent.roblox_packages.jecs)
 local common = require(script.Parent.common)
 
 type World = jecs.World

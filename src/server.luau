@@ -1,7 +1,7 @@
 --!optimize 2
 --!native
 
-local jecs = require(script.Parent.Parent.Parent.jecs)
+local jecs = require(script.Parent.Parent.roblox_packages.jecs)
 local utils = require(script.Parent.utils)
 local common = require(script.Parent.common)
 local masking_controller = require(script.Parent.masking)
