@@ -1,9 +1,9 @@
 --!native
 --!optimize 2
 
-local jecs = require(script.Parent.Parent.roblox_packages.jecs)
-local utils = require(script.Parent.utils)
-local mask_generator = require(script.mask_generator)
+local jecs = require "../jecs"
+local utils = require "./utils"
+local mask_generator = require "@self/mask_generator"
 
 type Entity<T = any> = jecs.Entity<T>
 
@@ -30,10 +30,10 @@ export type EntityComponentIndex<T> = {
 
 type Lookup = {
 	generator: MaskGenerator,
-	-- filter in component lookups will never be nil
 	filter: MemberFilter?,
 	storage_group: StorageGroup,
 }
+
 type ComponentLookup = Lookup & {
 	band_generator: MaskGenerator,
 }
@@ -260,7 +260,7 @@ function masking_controller.create_new_storage(
 end
 
 local function is_include_filter(filter: MemberFilter): boolean
-	for player, allow in filter do
+	for _, allow in filter do
 		if allow then
 			return true
 		else
@@ -284,17 +284,6 @@ local function create_new_changes(): EntityChanges
 		removed = {},
 		pairs = {},
 	}
-end
-
-function masking_controller.get_or_create_storage_group(masking: MaskingInternal, bitmask: Bitmask): StorageGroup
-	local hash = bitmask:tostring()
-	local storage = masking.storages[hash]
-
-	if not storage then
-		storage = masking:create_new_storage(bitmask, hash)
-		masking.storages[hash] = storage
-	end
-	return storage
 end
 
 local function get_component_index_entry<T>(

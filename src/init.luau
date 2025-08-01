@@ -1,4 +1,4 @@
-local RunService = game:GetService "RunService"
+local RunService = game:GetService("RunService")
 local jecs = require(script.Parent.roblox_packages.jecs)
 local world = require(game.ReplicatedStorage.shared.std.world)
 local common = require(script.common)
@@ -36,6 +36,7 @@ local replecs = {
 	serdes = component() :: jecs.Entity<common.Serdes>,
 	bytespan = component() :: jecs.Entity<number>,
 	custom_id = component() :: jecs.Entity<(any) -> jecs.Entity>,
+	global_id = component() :: jecs.Entity<number>,
 	__alive_tracking__ = tag(),
 }
 replecs.__index = replecs
@@ -47,7 +48,7 @@ replecs.Reliable = replecs.reliable
 replecs.Unreliable = replecs.unreliable
 replecs.Pair = replecs.pair
 replecs.Shared = replecs.shared
-
+replecs.GlobalId = replecs.global_id
 world:set(replecs.serdes, jecs.Name, "replecs.serdes")
 world:set(replecs.bytespan, jecs.Name, "replecs.bytespan")
 world:set(replecs.custom_id, jecs.Name, "replecs.custom_id")
