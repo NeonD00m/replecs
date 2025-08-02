@@ -1,4 +1,4 @@
-local jecs = require(script.Parent.Parent.roblox_packages.jecs)
+local jecs = require "../roblox_packages/jecs"
 
 export type PlayerFilter = {
 	[Player]: boolean,

@@ -1,8 +1,8 @@
 --!native
 --!optimize 2
 
-local jecs = require(script.Parent.Parent.roblox_packages.jecs)
-local common = require(script.Parent.common)
+local jecs = require "../roblox_packages/jecs"
+local common = require "./common"
 
 type World = jecs.World
 type Entity<T = any> = jecs.Entity<T>
@@ -47,15 +47,15 @@ function cursor.tryalloc(c: Cursor, bytes: number)
 		local exponent = math.ceil(math.log((bytes + offset) / len, 1.5))
 		local new = buffer.create(len * 1.5 ^ exponent)
 		buffer.copy(new, 0, buf, 0)
-		cursor.buffer = new
+		c.buffer = new
 	end
 end
 
 function cursor.write_buffer(c: Cursor, buf: buffer, start: number?, count: number?)
 	if start == nil and count == nil then
-	cursor.tryalloc(c, buffer.len(buf))
-	buffer.copy(c.buffer, c.offset, buf, 0, buffer.len(buf))
-	c.offset += buffer.len(buf)
+		cursor.tryalloc(c, buffer.len(buf))
+		buffer.copy(c.buffer, c.offset, buf, 0, buffer.len(buf))
+		c.offset += buffer.len(buf)
 	else
 		local len = buffer.len(buf)
 		local available = len - (start or 0)
@@ -661,6 +661,13 @@ function utils.remove_all_relations(world: World, entity: Entity, relation: Enti
 		local pair = archetype.types[i]
 		world:remove(entity, pair :: any)
 	end
+end
+
+function utils.setbit(mask: number, bit: number)
+	return bit32.bor(mask, bit32.lshift(1, bit))
+end
+function utils.checkbit(mask: number, bit: number)
+	return bit32.band(mask, bit32.lshift(1, bit)) ~= 0
 end
 
 function utils.logerror(...: string): never

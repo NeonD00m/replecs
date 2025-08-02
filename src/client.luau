@@ -1,9 +1,9 @@
 --!native
 --!optimize 2
 
-local jecs = require(script.Parent.Parent.roblox_packages.jecs)
-local common = require(script.Parent.common)
-local utils = require(script.Parent.utils)
+local jecs = require "../roblox_packages/jecs"
+local common = require "./common"
+local utils = require "./utils"
 
 local cursor = utils.cursor
 type Cursor = utils.Cursor
@@ -47,6 +47,7 @@ export type Client = {
 		removed: ((Entity, Entity) -> nil)?,
 		deleted: ((Entity) -> nil)?
 	},
+
 	apply_updates: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
 	apply_unreliable: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
 	apply_full: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
@@ -58,6 +59,11 @@ local ENTITY_ID_TYPES = {
 	custom = 2,
 	shared = 3,
 	global = 4,
+}
+local PACKET_TYPES = {
+	full = 1,
+	unreliable = 2,
+	reliable = 3,
 }
 
 local ECS_NAME = jecs.Name
@@ -149,12 +155,24 @@ local function read_entity_id(client: Client, c: Cursor, variants: { any }?): (E
 	end
 end
 
-local function process_entity_id(client: Client, c: Cursor, variants: { any }?, v: boolean?)
+local function process_entity_id(client: Client, c: Cursor, variants: { any }?)
 	local entity, server_id = read_entity_id(client, c, variants)
 	if entity then
 		return entity
 	else
 		return get_or_create_entity(client, server_id :: number)
+	end
+end
+
+local function process_entity_relation(client: Client, entity: jecs.Entity, c: Cursor, variants: { any }?)
+	local relation = read_component_id(client, c)
+	local total_targets = cursor.read_vlq(c)
+
+	for _ = 1, total_targets do
+		local target = process_entity_id(client, c, variants)
+		local pair = PAIR(relation, target)
+		client:call_changed(entity, pair)
+		client.world:add(entity, pair)
 	end
 end
 
@@ -171,56 +189,101 @@ local function process_entity(client: Client, c: Cursor, variants: { any }?)
 	local total_components = cursor.read_vlq(c)
 	for _ = 1, total_components do
 		local component, value = read_component_value(client, c, variants)
-		client:call_changed(entity, component, value)
+		client.call_changed(entity, component, value)
 		client.world:set(entity, component, value)
 	end
 
 	local total_pairs = cursor.read_vlq(c)
-	for i = 1, total_pairs do
-		local relation = read_component_id(client, c)
-		local total_targets = cursor.read_vlq(c)
+	for _ = 1, total_pairs do
+		process_entity_relation(client, entity, c, variants)
+	end
+end
 
-		for _ = 1, total_targets do
-			local target = process_entity_id(client, c, variants)
-			local pair = PAIR(relation, target)
-
-			client:call_changed(entity, pair)
-			client.world:add(entity, pair)
+local function check_packet_type(c: Cursor, type: string)
+	local byte_type = PACKET_TYPES[type]
+	local packet_type = cursor.readu8(c)
+	if packet_type ~= byte_type then
+		local got: string = nil :: any
+		for k, v in PACKET_TYPES do
+			if v == packet_type then
+				got = k
+				break
+			end
 		end
+
+		error(`packet type mismatch, expected {type} got {got} instead`)
+	end
+end
+
+local function read_vlq_bitmask(c: Cursor, mask: number, bit: number): number
+	if utils.checkbit(mask, bit) then
+		return cursor.read_vlq(c)
+	else
+		return 0
 	end
 end
 
 local function apply_updates(client: Client, buf: buffer, all_variants: { { any } }?)
 	local c = cursor.from(buf)
+	check_packet_type(c, "reliable")
+
 	local total_packets = cursor.read_vlq(c)
 	local variant_start = (all_variants and #all_variants + 1) :: number
 
 	for a = 1, total_packets do
 		local variants = all_variants and all_variants[variant_start - a]
-		local total_added = cursor.read_vlq(c)
+		local storage_mask = cursor.readu8(c)
 
-		for i = 1, total_added do
+		local total_added = read_vlq_bitmask(c, storage_mask, 0)
+		for _ = 1, total_added do
 			process_entity(client, c, variants)
 		end
 
-		local total_changed = cursor.read_vlq(c)
-		for _ = 1, total_changed do
+		local total_components_added = read_vlq_bitmask(c, storage_mask, 1)
+		for _ = 1, total_components_added do
 			local entity = process_entity_id(client, c, variants)
-			local total_tagged = cursor.read_vlq(c)
-			for _ = 1, total_tagged do
+			local added_mask = cursor.readu8(c)
+
+			local total_tags = read_vlq_bitmask(c, added_mask, 0)
+			for _ = 1, total_tags do
 				local tag = read_component_id(client, c)
 				client:call_changed(entity, tag)
 				client.world:add(entity, tag)
 			end
 
-			local total_components = cursor.read_vlq(c)
+			local total_components = read_vlq_bitmask(c, added_mask, 1)
 			for _ = 1, total_components do
 				local component, value = read_component_value(client, c, variants)
 				client:call_changed(entity, component, value)
 				client.world:set(entity, component, value)
 			end
 
-			local total_pairs = cursor.read_vlq(c)
+			local total_pairs = read_vlq_bitmask(c, added_mask, 2)
+			for _ = 1, total_pairs do
+				process_entity_relation(client, entity, c, variants)
+			end
+		end
+
+		local total_changed = read_vlq_bitmask(c, storage_mask, 2)
+		for _ = 1, total_changed do
+			local entity = process_entity_id(client, c, variants)
+			local changed_mask = cursor.readu8(c)
+
+			local total_tagged = read_vlq_bitmask(c, changed_mask, 0)
+			for _ = 1, total_tagged do
+				local tag = read_component_id(client, c)
+				client:call_changed(entity, tag)
+				client.world:add(entity, tag)
+			end
+
+			local total_components = read_vlq_bitmask(c, changed_mask, 1)
+			for _ = 1, total_components do
+				local component, value = read_component_value(client, c, variants)
+				client:call_changed(entity, component, value)
+				client.world:set(entity, component, value)
+			end
+
+			local total_pairs = read_vlq_bitmask(c, changed_mask, 2)
 			for _ = 1, total_pairs do
 				local relation = read_component_id(client, c)
 				local total_targets = cursor.read_vlq(c)
@@ -246,7 +309,7 @@ local function apply_updates(client: Client, buf: buffer, all_variants: { { any 
 				end
 			end
 
-			local total_removed = cursor.read_vlq(c)
+			local total_removed = read_vlq_bitmask(c, changed_mask, 3)
 			for _ = 1, total_removed do
 				local component = read_component_id(client, c)
 				client:call_removed(entity, component)
@@ -254,36 +317,36 @@ local function apply_updates(client: Client, buf: buffer, all_variants: { { any 
 			end
 		end
 
-		local total_component_deleted = cursor.read_vlq(c)
+		local total_component_deleted = read_vlq_bitmask(c, storage_mask, 3)
 		for _ = 1, total_component_deleted do
 			local entity = process_entity_id(client, c, variants)
+			local deleted_mask = cursor.readu8(c)
 
-			local total_tags = cursor.read_vlq(c)
+			local total_tags = read_vlq_bitmask(c, deleted_mask, 0)
 			for _ = 1, total_tags do
 				local tag = read_component_id(client, c)
 				client:call_removed(entity, tag)
 				client.world:remove(entity, tag)
 			end
 
-			local total_components = cursor.read_vlq(c)
+			local total_components = read_vlq_bitmask(c, deleted_mask, 1)
 			for _ = 1, total_components do
 				local component = read_component_id(client, c)
 				client:call_removed(entity, component)
 				client.world:remove(entity, component)
 			end
 
-			local total_pairs = cursor.read_vlq(c)
+			local total_pairs = read_vlq_bitmask(c, deleted_mask, 2)
 			for _ = 1, total_pairs do
 				local relation = read_component_id(client, c)
 				utils.remove_all_relations(client.world, entity, relation)
 			end
 		end
 
-		local total_deleted = cursor.read_vlq(c)
+		local total_deleted = read_vlq_bitmask(c, storage_mask, 4)
 		for _ = 1, total_deleted do
 			local entity, server_id = read_entity_id(client, c, variants)
 			if entity then
-				client:call_deleted(entity)
 				client.world:delete(entity)
 			end
 			if server_id then
@@ -295,6 +358,8 @@ end
 
 local function apply_unreliable(client: Client, buf: buffer, all_variants: { { any } }?)
 	local c = cursor.from(buf)
+	check_packet_type(c, "unreliable")
+
 	local total_packets = cursor.read_vlq(c)
 	local variant_start = (all_variants and #all_variants + 1) :: number
 
@@ -308,7 +373,7 @@ local function apply_unreliable(client: Client, buf: buffer, all_variants: { { a
 
 			if entity then
 				local component_id, value = read_component_value(client, c, variants)
-				client:call_changed(component_id, value)
+				client:call_changed(entity, component_id, value)
 				client.world:set(entity, component_id, value)
 			else
 				-- dont apply unreliable updates to entities that dont exist in the client yet
@@ -323,6 +388,8 @@ end
 
 local function apply_full(client: Client, buf: buffer, all_variants: { { any } }?)
 	local c = cursor.from(buf)
+	check_packet_type(c, "full")
+
 	local total_packets = cursor.read_vlq(c)
 	local variant_start = (all_variants and #all_variants + 1) :: number
 
@@ -335,7 +402,6 @@ local function apply_full(client: Client, buf: buffer, all_variants: { { any } }
 		end
 	end
 end
-
 
 local function added(client: Client, callback: (Entity) -> nil)
 	client.hooks.added = callback

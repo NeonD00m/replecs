@@ -4,7 +4,7 @@ description = "Replecs with hooks plus some configurations"
 includes = ["pesde.toml", "README.md", "LICENSE.md", "src/**"]
 license = "MIT"
 repository = "https://github.com/PepeElToro41/replecs"
-version = "0.0.1-rc.2-dev.5"
+version = "0.0.1-rc.2-dev.8"
 
 [indices]
 default = "https://github.com/pesde-pkg/index"
@@ -14,5 +14,12 @@ environment = "roblox"
 lib = "src/init.luau"
 build_files = ["src"]
 
+[wally_indices]
+default = "https://github.com/UpliftGames/wally-index"
+
+# [scripts]
+# roblox_sync_config_generator = ".pesde/scripts/roblox_sync_config_generator.luau"
+# sourcemap_generator = ".pesde/scripts/sourcemap_generator.luau"
+
 [dependencies]
-jecs = { name = "marked/jecs", version = "^0.9.0-rc.7" }
+jecs = { wally = "ukendio/jecs", version = "^0.9.0-rc.8" }
