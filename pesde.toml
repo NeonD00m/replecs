@@ -4,7 +4,7 @@ description = "Replecs with hooks plus some configurations"
 includes = ["pesde.toml", "README.md", "LICENSE.md", "src/**"]
 license = "MIT"
 repository = "https://github.com/PepeElToro41/replecs"
-version = "0.0.1-rc.2-dev.8"
+version = "0.1.0-dev.1"
 
 [indices]
 default = "https://github.com/pesde-pkg/index"
